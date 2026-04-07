@@ -1,0 +1,604 @@
+---
+title: "CTR Predictive Modeling on High-Cardinality Data using LightGBM
+        HarvardX Data Science Professional Certificate: PH125.9x"
+author: "Fidan Alasgarova"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+---
+
+
+
+
+
+# Executive Summary
+
+Accurate prediction of CTR enables advertisers to optimize ad targeting, enhance campaign effectiveness, and increase Return On Investment (ROI). This project developed a high-precision Click-Through Rate (CTR) predictive model using the Avazu mobile ads dataset. The primary objective was to transform millions of sparse, anonymized data points into actionable behavioral insights.
+
+Due to computational constraints and the requirement for code reproducibility, a strategic subset of the data was utilized. The data was sampled to allow impressions for a full 24-hour cycle (Appendix 1). 
+
+The Avazu dataset is characterized by extreme high cardinality and sparsity, with features like device_ip and site_id containing hundreds of thousands of unique identifiers. This project utilized the Light Gradient Boosting Machine (LightGBM) framework, a powerful model that groups data into smaller "bins" to make processing faster and more efficient. This approach allows the model to find hidden patterns among millions of rows, resulting in highly accurate predictions for ads that are most likely to be clicked. The final model used 127-leaf decision trees to capture complex non-linear relationships, providing a robust framework for real-time click prediction. 
+
+The final LightGBM model achieved an AUC of 0.75402, demonstrating superior ranking ability between click and non-click events. The LogLoss of 0.39397 indicates highly calibrated probabilities, which significantly optimize advertising spend by providing the precise accuracy required for competitive real-time bidding. By improving probability calibration, the model minimizes wasted bids on low-propensity bot traffic and overexposed fatigue ads. This ensures capital is allocated toward high-propensity impressions, significantly increasing the Return on Ad Spend (ROAS) and lowering the Cost Per Acquisition (CPA). 
+
+By combining feature engineering with the computational efficiency of LightGBM, this project offers a robust and scalable solution for modern ad-tech challenges. It is highly reusable and adaptable to any high-cardinality CTR dataset. Furthermore, by substituting Avazu-specific identifiers with equivalent features, the core logic of tracking user behavior remains unchanged. Frequency-based filtering methodologies are universal, and the same mathematical principles used to detect repetitive ad exposure can be repurposed to identify product saturation in retail or flag unusual spikes in web traffic. The model can provide a standardized, scalable blueprint for extracting high-precision insights for many large-scale, sparse tabular datasets.
+
+
+# Introduction 
+
+With the rapid expansion of digital technologies, a digital marketing strategy focuses on achieving specific business objectives such as increasing brand awareness, generating leads, driving website traffic, or boosting sales through online channels. As billions of mobile devices are used worldwide each year, mobile marketing has become an increasingly competitive environment for advertisers. To evaluate the effectiveness of digital marketing campaigns, businesses track KPIs such as ROI, conversion rate, CTR, website traffic and social media engagement rate.
+
+CTR is a fundamental metric in digital advertising. It measures the proportion of users who click on an advertisement after viewing it and is calculated as the number of clicks divided by the number of impressions. 
+
+$$
+CTR = Number of Clicks/Number of Impressions
+$$   
+
+A high CTR typically indicates effective targeting and engaging content, while a low CTR suggests that improvements are needed in campaign design or audience targeting. Accurate prediction of CTR enables advertisers to optimize ad targeting, enhance campaign effectiveness and increase ROI.
+
+# Project Overview
+
+The Avazu dataset, available on Kaggle, was released in 2015 as part of a competition to predict CTR based on 11 days of advertising data. It contains anonymized features related to user behavior, device characteristics, and advertisement context. While several datasets were considered for the HarvardX IDV project, the author's background in digital marketing made the Avazu dataset particularly appealing. Predicting CTR is a key challenge in digital advertising, and this dataset provides a realistic environment for applying machine learning techniques to a real-world business problem.
+
+Originally, the Avazu dataset contains over 40 million observations and 24 variables, corresponding to more than 40 million rows and 24 columns. Due to its large size (approximately 1.4 GB), it is not practical to load and model the entire dataset on a standard personal computer because of computational and memory constraints. For the purpose of this project, a representative subset (subset) of 1,810,501 rows and 9 selected features was used. This reduced (24.7 MB) subset was uploaded to GitHub (with max limit 25 MB) to enable efficient processing while preserving the essential structure and variability of the original data. Each row represents a single ad impression, and the selected columns correspond to key features relevant for CTR prediction. 
+
+Due to the high dimensionality and sparsity of the Avazu dataset, effective data preprocessing and feature engineering are essential for building a robust predictive model. Initial random sampling resulted in temporal bias, as data for early periods dominated the sample. This was corrected by applying proportional sampling (in chunks), ensuring randomness and representation across the full 24-hour period (Refer to Appendix 1).
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+###############################################################################
+#  Load subset of Avazu dataset from the Github repository 
+###############################################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(recosystem)) install.packages("recosystem")
+if(!require(lightgbm)) install.packages("lightgbm")
+if(!require(ROCR)) install.packages("ROCR")
+
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(recosystem)
+library(readr)
+
+data_url <- "https://raw.githubusercontent.com/natros22/HarvardX-IDV-CTR-Predictor-Avazu/main/avazu_data.csv.gz"
+
+local_file <- "avazu_dataset.csv.gz"
+
+options(timeout = 600)
+
+download.file(data_url, local_file, mode = "wb")
+
+set.seed(123)
+
+avazu_subset <- read_csv(local_file, show_col_types = FALSE)
+```
+
+# Data Exploratory Analysis
+
+After prepossessing and feature selection, the working subset contains 1,810,501 observations and 9 features.
+
+```{r, echo = TRUE, message = FALSE, warning = FALSE}
+# Subset dimenstions
+dim(avazu_subset)
+```
+
+This reduced subset enables efficient computation while retaining the most relevant information for modeling CTR.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Column Names
+colnames(avazu_subset)
+```
+
+The original Avazu dataset was curated to focus on nine key columns, identified as the most influential features for predicting CTR. By narrowing the data to these specific indicators, the subset size was reduced to fit within a 25 MB (Github limit) for reproducibility. This focused approach ensures the model remains computationally efficient and easy to share while retaining the essential information necessary for accurate CTR prediction.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of Duplicates
+sum(duplicated(avazu_subset))
+```
+Within the 1,810,501 row subset, 99,255 entries were identified as duplicates across all recorded features. However, these are not considered redundant or erroneous data. In the absence of unique user identifiers, these 'duplicates' represent recurring identical interactions such as a specific device model on the same application being served the same advertisement multiple times. Retaining these rows is critical, as they capture the frequency and density of ad exposure, which are essential components for modeling user behavior and identifying patterns of ad fatigue.
+
+## Click
+
+Sparsity measures the proportion of empty or zero entries within a subset. The Avazu dataset exhibits extreme sparsity because the vast majority of impressions do not result in a click represented by '0'. While the ratio of '1' to total impressions defines the CTR, the high sparsity of categorical features creates a complex modeling environment. 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Total impressions
+total_impressions <- nrow(avazu_subset)
+
+# Count the non-clicks
+non_clicks <- sum(avazu_subset$click == 0)
+
+# Sparsity
+sparsity <- non_clicks / total_impressions
+
+sparsity 
+```
+
+Approximately 83% of the observations in the click column are zeros, indicating that most user-ad pairs have no clicks.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of Clicks
+sum(avazu_subset$click)
+```
+The click is the target dependent variable the model is trying to predict. There are 307,075 click events in the subset. 
+
+## Hour
+
+The hour column encodes the exact timestamp of the impression and captures cyclical human behavior. For example, CTR usually spike during evening leisure hours and drop to near zero during early morning hours when only bots are active. The raw hour feature in the Avazu dataset encodes the time of each ad impression in a numeric format that combines both the date and hour (YYYYMMDDHH). 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Modified Hour Feature
+avazu_subset <- avazu_subset %>%
+  mutate(
+    hour_num = as.integer(substr(hour, 7, 8)))
+head(avazu_subset)
+```
+
+To analyze how the timing of ads affects the CTR, it is necessary to represent the hour of the day in a clear numeric format.
+The original Avazu dataset was sampled to extract rows that capture ad impressions throughout the full 24-hour cycle, as confirmed by examining the unique values of the hour_num variable.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Impressions per Hour
+table(substr(as.character(avazu_subset$hour), 7, 8))
+```
+The output shows values ranging from 0 to 23, indicating that all hours of the day are represented for a comprehensive analysis of patterns, such as variations in CTR throughout the day. The distribution of impressions by hour shows that user activity fluctuates throughout the day, with some hours exhibiting notably higher ad impressions. These patterns are useful for understanding user behavior and optimizing ad timing.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# CTR by Hour
+avazu_subset %>%
+  group_by(hour_num) %>%
+  summarise(ctr = mean(click)) %>%
+  ggplot(aes(x = hour_num, y = ctr)) +
+  geom_col(fill = "#5E9BD8") +
+  scale_x_continuous(breaks = 0:23) +
+  labs(title = "CTR by Hour", x = "Hour of Day", y = "CTR")
+```
+
+While the total number of ad impressions changes significantly throughout the day, the CTR stays relatively consistent. This shows that the time of day mainly affects how many people are online, rather than how likely any single person is to click an ad. Since the Avazu dataset covers only 11 days, analysis of weekly and monthly trends, as they lack repetitive patterns is unlikely to produce reliable insights.
+
+## C14 and C17
+
+We make the inference that C14 is ad ID and C17 is ad group ID by analyzing the hierarchy of the unknown features. C17 and C14 represent a one-to-many relationship, as one ad group can have several ad IDs.
+
+## C14
+
+Ad ID is the unique ID for the specific advertisement. This is one of the strongest features. It identifies what is being shown to user. Some ads are simply more attractive than others. To predict future clicks of the specific ad ID the model tracks its historical success. 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number or ad IDs 
+length(unique(avazu_subset$C14))
+```
+There are 2200 unique ad ID in the subset. 
+ 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# CTR by ad ID
+c14_ctr_analysis <- avazu_subset %>%
+  group_by(C14) %>%
+  summarise(
+    clicks = sum(click),
+    impressions = n(),
+    ctr = sum(click) / n())
+c14_ctr_analysis
+```
+
+The distribution of CTR across different Ad IDs is highly disproportionate. While high-volume ads with low CTRs indicate inefficient spending, niche ads with high CTRs reveal new opportunities for more effective budget allocation. To maintain predictive accuracy, the model must account for the noise such as a deceptive 50% CTR from only two impressions. By smoothing these outliers toward the global average, the model prevents overestimating the performance of rare ads and ensures more reliable predictions.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Aggregating data by C14
+c14_summary <- avazu_subset %>%
+  group_by(C14) %>%
+  summarise(
+    total_impressions = n(),
+    total_clicks = sum(click),
+    ctr = total_clicks / total_impressions) %>%
+  filter(total_impressions > 100)
+ggplot(c14_summary, aes(x = total_impressions, y = total_clicks, color = ctr)) +
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_gradient(low = "#007BC0", high = "yellow") +
+  labs(
+    title = "Ad Performance by C14: Clicks vs. Impressions",
+    x = "Total Impressions",
+    y = "Total Clicks",
+    color = "CTR")
+```
+
+High-volume ads with low CTR represent an expensive and inefficient budget allocation, while low-volume ads with high CTR are high-potential opportunities that the model should prioritize.
+
+## C_17
+
+C17 is believed to be the ad group identifier that groups similar ads (C14) into a single campaign category. If a specific new ad has no history yet, the model looks at its ad group to guess how it might perform. This makes it a reliable option, allowing the model to make calculated predictions for new ads by using the past success of their broader group.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of Group IDs
+length(unique(avazu_subset$C17))
+```
+There are 397 Ad Groups in the subset.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# CTR of top 15 Ad Groups
+c17_summary <- avazu_subset %>%
+  group_by(C17) %>%
+  summarise(
+    impressions = n(),
+    ctr = mean(click),
+    unique_ads = n_distinct(C14)) %>%
+  arrange(desc(impressions))
+c17_summary %>%
+  top_n(15, impressions) %>%
+  ggplot(aes(x = reorder(as.factor(C17), ctr), y = ctr)) +
+  geom_bar(stat = "identity", fill = "#5E9BD8") +
+  coord_flip() +
+  labs(title = "CTR of Top 15 Ad Groups (C17)", x = "Ad Group ID", y = "CTR")
+```
+
+Some ad groups have distinctly higher CTR than others. By looking at these groups, the model can easily find high-performance clusters that attract much more attention than the average ad, helping it identify which campaigns are naturally more appealing to users.
+
+By combining C14 and C17 we can assess the success of the creative of the specific ad. If every C14 performs differently within the same campaign C17, it suggests that the individual ad's design - the creative is the real driver of the click. 
+
+## Site ID and App ID
+
+Site ID is the unique ID of the website hosting the ad. It is a high-signal feature for where the interaction happens. App ID is the unique ID of the mobile application hosting the ad and is similar to site_id, but for the app ecosystem. In the Avazu dataset, site_id and app_id serve as the primary environment indicators. To reduce data sparsity and simplify the model, these are combined into a single Placement ID. This consolidated feature captures the specific digital context of each ad impression.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Distribution of Clicks by placement ID
+avazu_placement <- avazu_subset %>%
+  mutate(placement_id = ifelse(site_id == "85f751fd", app_id, site_id))
+avazu_placement %>%
+  group_by(placement_id) %>%
+  summarise(total_clicks = sum(click)) %>%
+  ggplot(aes(x = total_clicks)) +
+  geom_histogram(bins = 15, fill = "gold", color = "white") +
+  scale_x_log10() +
+  labs(title = "Distribution of Clicks by Placement",
+       x = "Total Clicks (Log Scale)",
+       y = "Frequency of Placements")
+```
+
+The Placement ID analysis reveals a highly skewed distribution, where a small number of high-traffic entities generates the vast majority of total clicks. This concentration of activity suggests that ad engagement is not uniform; rather, it is driven by a few dominant platforms. For predictive modeling, this necessitates a balance between capturing the high-signal patterns of these placements and preventing the model from overfitting to the long-tail of low-volume sites and apps that lack sufficient statistical significance.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Placement by Clicks VS CTR
+placement_performance <- avazu_placement %>%
+  group_by(placement_id) %>%
+  summarise(
+    total_clicks = sum(click),
+    total_impressions = n(),
+    ctr = total_clicks / total_impressions) %>%
+  filter(total_clicks > 10) 
+ggplot(placement_performance, aes(x = total_clicks, y = ctr)) +
+  geom_point(aes(size = total_impressions), color = "#007", alpha = 0.5) +
+  scale_x_log10() +  
+  labs(title = "Placement Performance: Clicks vs. CTR",
+    x = "Total Clicks (Log Scale)",
+    y = "Click-Through Rate (CTR)")
+```
+
+The Placement Performance scatterplot illustrates the relationship between engagement volume and efficiency. By plotting total clicks against CTR on a logarithmic scale, we can distinguish between high-volume placements that drive the majority of traffic and high-efficiency niche placements. The bubble size, representing total impressions, further highlights the scale of each environment. This visualization confirms a power-law distribution in the Avazu data, where a small number of placements provide the most significant signal for the model, while the long-tail of smaller placements requires robust regularization to prevent overfitting.
+
+## Device Model 
+
+Device model acts as a high-quality demographic proxy, that segments user groups by wealth, technical capability, and behavior. While more expensive models often correlated with higher CTR for luxury goods, travel and financial service, budget models show higher engagement with free-to-pay games and discount offers. Furthermore, screen size and connection speed affect ad's bounce rates, as banner visibility and load times also have effect on CTR. 
+ 
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of unique device models
+length(unique(avazu_subset$device_model))
+```
+
+The subset contains 5,698 unique mobile device models, reflecting the high device diversity of the mobile advertising ecosystem. This high cardinality allows the model to use the device model as a sophisticated demographic proxy for user purchasing power and technical capabilities, which is essential for personalizing ad delivery in an anonymized environment.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Device Models by CTR
+device_tiers <- avazu_subset %>%
+  group_by(device_model) %>%
+  summarise(impressions = n(), ctr = mean(click)) %>%
+  mutate(ctr_tier = cut(ctr, 
+                        breaks = seq(0, 1, by = 0.05), 
+                        include.lowest = TRUE,
+                        labels = paste0(seq(0, 95, by = 5), "-", seq(5, 100, by = 5), "%"))) %>%
+  group_by(ctr_tier) %>%
+  summarise(total_impressions = sum(impressions)) %>%
+  filter(!is.na(ctr_tier)) 
+ggplot(device_tiers, aes(x = ctr_tier, y = total_impressions, fill = total_impressions)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::comma) +
+  labs( title = "Ad Reach (Impressions) by Device Model", x = "Device Model CTR (%)", y = "Total Impressions", fill = "Volume") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The distribution of impressions across device model reveals that ad reach is not uniform. While many device models exhibit low engagement, a smaller subset of high-performing devices achieves significantly higher CTR. This disparity confirms that device_model is a high-signal predictor, as the model must distinguish between high-volume devices and high-efficiency models to optimize bid accuracy.
+
+## Device_IP 
+
+By tracking specific device IP addresses and analyzing their behavior, the model identifies unique users and distinguishes human interaction from automated bot activity. This granularity enables a sophisticated frequency capping analysis: if an advertisement is served multiple times to the same IP without a conversion, the model learns to reduce the click probability for that specific IP, thereby preventing wasted ad spend on unresponsive audiences.
+ 
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of Device IP
+ip_num <- length(unique(avazu_subset$device_ip))
+ip_num
+```
+
+With 874,418 unique device IPs in a subset of 1.8 million rows, the subset exhibits extreme high cardinality and captures a wide range of user behavior. 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Device IP with a Click
+devices_with_click <- avazu_subset %>%
+  filter(click == 1) %>%
+  summarise(devices_with_clicks = n_distinct(device_ip))
+devices_with_click
+```
+
+The number of devices IPs with at least one click is 199194.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+(devices_with_click/ip_num)*100	
+```
+
+The analysis reveals that only 22.8% of unique device IP addresses in the 1.8 million row subset ever recorded a click. This suggests that nearly 77% of the total audience remains passive, receiving impressions without interacting with the content.
+
+## Banner position CTR
+
+Banner position identifies where on the screen the ad appeared and measures visibility. 
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Number of Banner Positions
+sort(unique(avazu_subset$banner_pos))
+```
+
+There are 7 banner positions available for ads in the subset. The position of the advertisement is an important factor influencing user engagement. Ads placed in more prominent positions are more likely to attract attention and result in higher CTR, while less visible positions tend to generate lower interaction.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Aggregate CTR by Banner Position
+banner_ctr <- avazu_subset %>%
+  group_by(banner_pos) %>%
+  summarise(banner_ctr = mean(click)) 
+ggplot(banner_ctr, aes(x = factor(banner_pos), y = banner_ctr, fill = banner_ctr)) +
+  geom_col() +
+  scale_y_continuous(labels = function(x) paste0(round(x*100, 1), "%")) +
+  labs(title = "CTR by Banner Position", x = "Banner Position ID", y = "Average CTR (%)", fill = "CTR") 
+```
+
+The CTR varies by banner position, highlighting that ad placement influences user engagement. Positions with higher CTR are more effective at generating clicks and should be prioritized in targeting strategies. The highest CTR is attributed to position 7, with position 2 achieving the lowest CTR. Analysis of CTR across different banner positions shows that ad placement significantly affects user interaction with the ad. Certain positions consistently achieve higher CTR, indicating that visibility and placement are key drivers of engagement.
+
+# LightGBM
+
+The LightGBM model was chosen for this project because of its exceptional ability to handle the scale, sparsity, and high cardinality of the Avazu dataset. Specifically, LightGBM was selected because its histogram-based learning and leaf-wise growth strategy allows it to process hundreds of thousands of unique identifiers like site ID, app ID and IP addresses without exhausting system memory or losing accuracy. It excels at finding deep, non-linear interactions between features, such as identifying the exact moment a specific device type on a particular app is most likely to engage with an ad. This makes it a robust, high-speed solution for the "big data" challenges of real-time click prediction.
+
+Training set 80% - used to fit the model and learn patterns in user interactions with ads.
+Testing set 20% - held out to evaluate model performance on unseen data, ensuring that results reflect how the model would perform in the real-world scenario. 
+
+
+## Feature Engineering 
+
+Hour_num feature is applied to capture human behavior throughout the day and to identify peak engagement periods when CTR are highest and detects off-peak intervals where automated bot traffic is more prevalent, distinguishing between genuine human activity and machine-generated impressions.
+
+Device_ip and device_model are concatenated to create a user proxy to track behavior in an anonymized environment. This fingerprint is paired with $\log(1+n)$ frequency counts to flag automated bots or data centers that generate high volumes of impressions without any engagement, allowing the model to drastically lower the predicted probability for those rows. Additionally, the device_ip provides critical context regarding a user's network speed, distinguishing between high-speed corporate WiFi and slow mobile signals to better estimate the likelihood of an ad successfully loading and being clicked.
+
+Site_id and app_id are utilized as supplementary features and treated interchangeably as a unified placement type. This consolidation reduces feature sparsity and dimensionality, allowing the model to learn the value of the advertising placement more effectively across both mobile web and applications.
+
+C14, inferred to be the ad ID, is combined with the hour feature to monitor hourly impression density and detect ad fatigue. This occurs when an ad is shown too many times, causing it to become repetitive and lose its effectiveness. The model automatically predicts a lower likelihood of clicks due to overexposure.
+
+C17 is believed to represent an Ad Group or Campaign ID. If a specific ad (C14) is new and lacks a performance history, the model uses the aggregate performance of the C17 group to estimate its probability of CTR. 
+
+Banner_pos feature serves as a critical measure of visibility, allowing the model to establish a baseline probability before analyzing specific ad content. Since ads at the top of the screen typically yield a much higher click-through rate than those hidden at the bottom, the model uses this metric to identify which screen placements, when paired with specific sites or apps, drive the highest likelihood of user engagement.
+
+# Evaluation 
+
+## Logloss
+
+The Logarithmic Loss (LogLoss) measures the accuracy of predicted probabilities for binary outcomes such as click or non-click (1/0) in CTR predictions. LogLoss is highly sensitive to the calibration of the model, as it measures how closely the predicted probability of a click aligns with the actual outcome. For the Avazu Kaggle competition, LogLoss was the primary evaluation metric because CTR prediction is fundamentally a problem of expected value; advertisers need precise probability estimates to determine the optimal bid for an ad impression. A low LogLoss indicates that the model is not only identifying which users are likely to click, but is also assigning highly reliable probability scores, ensuring that the business can trust these predictions for real-time financial decision-making.
+
+$$
+\text{LogLoss} = - \frac{1}{n} \sum_{i=1}^{n} \Big[ y_i \cdot \log(\hat{y}_i) + (1 - y_i) \cdot \log(1 - \hat{y}_i) \Big]
+$$
+
+## AUC
+
+Area Under the ROC Curve (AUC) is a performance metric that measures a model’s ability to discriminate between classes in this case, whether a user will click an ad or not. Unlike metrics that depend on a specific classification threshold, AUC evaluates the probability that a randomly chosen positive instance (click = 1) is ranked higher by the model than a randomly chosen negative instance (click = 0). For the CTR prediction, AUC is particularly valuable because it assesses the model’s ranking proficiency. In the context of digital advertising, accurately identifying which ads are relatively more likely to be clicked is often more critical for effective ad placement and bidding strategies than the absolute probability values themselves, making AUC an essential complement to LogLoss for a robust evaluation.
+
+$$
+\text{AUC} = \frac{\text{Number of correctly ordered positive-negative pairs}}{\text{Total number of positive-negative pairs}}
+$$
+
+## LightGBM CTR Prediction Machine
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+library(dplyr)
+library(readr)
+library(lightgbm)
+library(ROCR)
+
+# Ensure reproducibility
+set.seed(123)
+
+# Reload avazu_subset
+avazu_subset <- read_csv(local_file, show_col_types = FALSE)
+
+# Feature engineering
+avazu_subset <- avazu_subset %>%
+  mutate(
+    # Hour of day
+    hour_day = as.integer(substr(as.character(hour), 7, 8)),
+    # User Proxy
+    user_proxy = paste(device_ip, device_model, sep = "_"),
+    # Placement Identity
+    placement = ifelse(site_id == "85f751fd", app_id, site_id)) %>%
+  # Ad appearances per hour
+  group_by(hour, C14) %>%
+  mutate(ad_hourly_cnt = log1p(n())) %>%
+  # IP Frequency
+  group_by(device_ip) %>%
+  mutate(ip_cnt = log1p(n())) %>%
+  ungroup()
+
+# Define feature sets
+features <- c("hour_day", "banner_pos", "placement", "device_model", 
+              "user_proxy", "C14", "C17", "ip_cnt", "ad_hourly_cnt")
+categorical_features <- c("banner_pos", "placement", "device_model", "user_proxy", "C14", "C17")
+target <- "click"
+
+# Train/Test split
+train_idx <- sample(1:nrow(avazu_subset), 0.8 * nrow(avazu_subset))
+train_set <- avazu_subset[train_idx, ]
+test_set  <- avazu_subset[-train_idx, ]
+
+# Categorical Encoding
+for (col in categorical_features) {
+  train_levels <- unique(train_set[[col]])
+  
+  # Convert to factor based on training levels only
+  train_set[[col]] <- as.integer(factor(train_set[[col]], levels = train_levels)) - 1
+  test_set[[col]]  <- as.integer(factor(test_set[[col]],  levels = train_levels)) - 1}
+
+# Prepare LightGBM dataset 
+dtrain <- lgb.Dataset(
+  data = as.matrix(train_set %>% select(all_of(features))),
+  label = train_set[[target]],
+  categorical_feature = categorical_features)
+
+dtest <- lgb.Dataset(
+  data = as.matrix(test_set %>% select(all_of(features))),
+  label = test_set[[target]],
+  reference = dtrain)
+
+# Optimized Parameters
+params <- list(
+  objective = "binary",
+  metric = "binary_logloss",
+  boosting = "gbdt",
+  learning_rate = 0.05,    
+  num_leaves = 127,        
+  feature_fraction = 0.7,  
+  bagging_fraction = 0.7,
+  bagging_freq = 5,
+  force_col_wise = TRUE,
+  verbosity = -1)
+
+# Train model
+lgb_model <- lgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 500,          
+  valids = list(test = dtest),
+  early_stopping_rounds = 30)
+
+# Predict
+pred_prob <- predict(lgb_model, as.matrix(test_set %>% select(all_of(features))))
+pred_obj <- prediction(pred_prob, test_set[[target]])
+
+# Evaluate
+# Calculate AUC
+auc_val <- performance(pred_obj, "auc")@y.values[[1]]
+
+# Calculate LogLoss (with epsilon to avoid Inf)
+logloss_val <- -mean(test_set[[target]] * log(pred_prob + 1e-15) +
+                   (1 - test_set[[target]]) * log(1 - pred_prob + 1e-15))
+
+# Results
+cat("AUC:    ", round(auc_val, 5), "\n")
+cat("LogLoss:", round(logloss_val, 5), "\n")
+```
+
+## Regularization
+
+To prevent overfitting on features with high cardinality, a feature_fraction of 0.7 was applied, forcing the model to select a random 70% subset of features for each tree. Additionally, a bagging_fraction of 0.7 was utilized to reduce the influence of outliers or noisy data points, such as automated bots generating repetitive clicks. This approach made the model less sensitive to variance in the training data and improved its ability to generalize to unseen users.
+
+## Optimization
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# Check the training parameters: 127 leaves decision tree
+print(lgb_model$params$num_leaves)
+```
+The model was trained using a Binary Logistic Loss objective with a learning rate of 0.05, allowing for slower learning and better generalization. Early stopping was implemented to halt training once the validation LogLoss ceased to improve, ensuring the highest level of generalization. By using Integer Encoding for categorical features and Log Counts for frequency features, the model creates a dense matrix that LightGBM uses to build 127-leaf decision trees, increasing depth for complex interactions. This structural depth enables the model to identify intricate relationships, such as "a premium level device_model on a specific ad placement at 8 PM seeing a fresh C14 ad."
+
+# Results
+
+A LightGBM-based Gradient Boosting approach is used to address the high-cardinality and sparsity inherent in the Avazu CTR dataset. By engineering time based fatigue features and user-proxy interactions, the model achieves a refined balance between ranking accuracy (AUC) and probability calibration (LogLoss). The final ensemble uses 127-leaf decision trees to capture complex non-linear relationships, providing a robust framework for real-time click prediction.
+
+The model achieved an AUC of 0.75402, demonstrating a 75.4% probability that the model will correctly rank a random click higher than a random non-click. This strong ranking performance, paired with a LogLoss of 0.39397, indicates that the predicted probabilities are well-calibrated and reliable for advertisement budget allocation. By accurately quantifying click probability, advertisers can utilize this model to significantly optimize their ROI, effectively filtering out bot-driven impressions to ensure their budget is focused on high-intent human users, thereby preventing substantial wasted ad spend. This ensures capital is allocated toward high-propensity impressions, significantly increasing ROAS and lowering the CPA. 
+
+## Furhter development and adaptation
+
+The architectural framework of this LightGBM model is designed for universal application across sparse, tabular datasets. To reuse this LightGBM framework for a different dataset, the methodology remains identical even as the column names can change. The model is highly portable because it focuses on behavioral logic rather than specific Avazu IDs.
+
+## Sample Portability Methodology 
+
+   1. Identity Proxy: Replace device_ip + device_model with whatever unique identifiers the new data provides (e.g., User_ID, Cookie_ID, or Hashed_Email). The goal is to recreate a "digital fingerprint" to track user history.
+   2. Universal Fatigue Logic: The ad_hourly_cnt logic is universal; in a new dataset, you simply map this to the primary "Offer" or "Product" ID. It will continue to detect if a specific item is being over-exposed to a user in a short periods of time.
+   3. Frequency Filtering: The ip_cnt logic can be applied to any high-frequency categorical feature (like Source_URL or Publisher_ID) to automatically flag and discount automated bot or crawler traffic.
+   4. Parameter Portability: The core LightGBM settings—127 leaves for deep interactions and 0.7 feature fraction for regularization, provide a high-performance baseline for almost any sparse, tabular CTR data.
+
+\newpage
+
+# Appendix. 1
+
+A memory-efficient sampling method was employed using a chunked callback strategy to process the original Avazu dataset into a sample with a maximum size of 25 MB. By selecting 300,000 row segments and applying proportional sampling, a representative 300,000-row subset was extracted, reducing the data to nine high-signal features. Strategic sampling ensured that the data subset accurately represented the entire 24-hour daily range. This methodology guarantees that the final dataset is both computationally manageable and analytically robust.
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+
+library(readr)
+library(dplyr)
+library(curl)
+library(stringr)
+
+zip_path <- "C:/Users/Documents/Avazu.zip"
+unzip_dir <- tempdir()
+unzip(zip_path, exdir = unzip_dir)
+
+all_files <- list.files(unzip_dir, full.names = TRUE)
+file_name_train <- all_files[str_detect(all_files, "train") & str_detect(all_files, ".csv")]
+
+set.seed(123)
+sample_size <- 300000
+chunk_size <- 300000
+
+# Estimate total rows
+total_rows <- 6000000
+sampling_fraction <- sample_size / total_rows
+
+collected <- list()
+
+callback <- function(x, pos) {
+  
+  # Sample proportionally from each chunk
+  sampled_chunk <- x %>%
+    slice_sample(prop = sampling_fraction)
+  
+  collected[[length(collected) + 1]] <<- sampled_chunk
+  
+  return(NULL)}
+
+target_file <- "avazu_data.csv.gz" 
+
+read_csv_chunked(
+  target_file,
+  callback = DataFrameCallback$new(callback),
+  chunk_size = chunk_size,
+  show_col_types = FALSE)
+avazu_sample <- bind_rows(collected)
+
+avazu_sample <- avazu_sample %>% select(
+  click,
+  hour,
+  banner_pos, 
+  site_id,
+  app_id,
+  device_model,
+  C14, 
+  C17,
+  device_ip)
+
+write_csv(avazu_sample, "avazu_data.csv.gz")
+
+```
+
+\newpage
+
+
+References:
+
+Avazu Kaggle competition page: https://www.kaggle.com/competitions/avazu-ctr-prediction/overview
+
+
